@@ -1,34 +1,41 @@
-use clap::{crate_version, App, Arg};
+use clap::{App, Arg, crate_version};
 
 fn main() {
     let matches = App::new("degit-rs")
         .version(crate_version!())
-        .author("Vlad Pănăzan <brgdvz@gmail.com>")
         .about("Download the contents of a git repository without cloning it.")
         .arg(
             Arg::with_name("src")
                 .help("the source repo you want to download")
                 .long_help(
-"The repository you want to download. This can be either the full url or a shortened form:
+"The repository you want to download. This can take any of the following forms:
 
-user/repo
-github:user/repo
-git@github.com:user/repo
-https://github.com/user/repo
+GitHub:
+  user/repo
+  github:user/repo
+  https://github.com/user/repo
 
-gitlab:user/repo
-git@gitlab.com:user/repo
-https://gitlab.com/user/repo
+GitLab:
+    gitlab:user/repo
+    https://gitlab.com/user/repo
 
-bitbucket:user/repo
-git@bitbucket.org:user/repo
-https://bitbucket.org/user/repo
+BitBucket:
+    bitbucket:user/repo
+    https://bitbucket.org/user/repo
+
+You can clone a specific subdirectory instead of the entire repository:
+    user/repo/subdirectory
+
+And you can specify a branch (defaults to HEAD), tag, or commit from any of the above forms using:
+    user/repo#branch
+    user/repo#v1.0.0
+    user/repo#abcd1234
 
 ")
 
                 .required(true)
                 .index(1)
-                .validator(degit::validate_src),
+                .validator(degit_rs::validate_src),
         )
         .arg(
             Arg::with_name("dest")
@@ -36,7 +43,7 @@ https://bitbucket.org/user/repo
                 .long_help("The destination directory. This is where the contents of the repository will be downloaded.")
                 .required(false)
                 .index(2)
-                .validator(degit::validate_dest)
+                .validator(degit_rs::validate_dest)
                 .default_value("."),
         )
         .arg(
@@ -49,5 +56,5 @@ https://bitbucket.org/user/repo
 
     let src = matches.value_of("src").unwrap();
     let dest = matches.value_of("dest").unwrap();
-    degit::degit(src, dest);
+    degit_rs::degit(src, dest);
 }

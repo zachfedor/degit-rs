@@ -2,31 +2,50 @@ use colored::*;
 use flate2::read::GzDecoder;
 use indicatif::{ProgressBar, ProgressStyle};
 use regex::Regex;
-use std::{error::Error, fmt, path::PathBuf};
+use std::{error::Error, fmt, path::PathBuf, process::Command};
 use tar::Archive;
 
 #[derive(Debug, PartialEq)]
 enum Host {
-    Github,
-    Gitlab(String),
+    GitHub,
+    GitLab(String),
     BitBucket,
 }
 
 #[derive(Debug, PartialEq)]
 struct Repo {
     host: Host,
-    project: String,
     owner: String,
+    name: String,
+    subdir: Option<String>,
+    gitref: Option<String>,
+}
+
+impl Repo {
+    pub fn url(&self) -> String {
+        match &self.host {
+            Host::GitHub => format!("https://github.com/{}/{}", self.owner, self.name),
+            Host::GitLab(domain) => format!("https://{}/{}/{}", domain, self.owner, self.name),
+            Host::BitBucket => format!("https://bitbucket.org/{}/{}", self.owner, self.name),
+        }
+    }
 }
 
 impl fmt::Display for Repo {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         let owner = self.owner.bold().underline();
-        let project = self.project.red();
+        let mut project = self.name.as_str().to_string();
+        if let Some(subdir) = self.subdir.as_ref() {
+            project = format!("{project}/{subdir}")
+        }
+        if let Some(gitref) = self.gitref.as_ref() {
+            project = format!("{project}#{gitref}")
+        }
+        let project = project.red();
         let host = match self.host {
-            Host::Github => "GitHub".blue(),
-            Host::Gitlab(_) => "GitLab".red(),
-            Host::BitBucket => "BitBucket".green(),
+            Host::GitHub => "GitHub".blue(),
+            Host::GitLab(_) => "GitLab".blue(),
+            Host::BitBucket => "BitBucket".blue(),
         };
         write!(f, "{}/{} from {}", owner, project, host)
     }
@@ -41,91 +60,62 @@ pub fn degit(src: &str, dest: &str) {
 }
 
 fn parse(src: &str) -> Result<Repo, Box<dyn Error>> {
-    let repo_match = Regex::new(
-        r"(?x)
-                                (?P<protocol>(git@|https://))
-                                (?P<host>([\w\.@]+))
-                                (/|:)
-                                (?P<owner>[\w,\-,_]+)
-                                /
-                                (?P<repo>[\w,\-,_]+)
-                                (.git)?/?
-                                ",
-    )
-    .unwrap();
-    let shortrepo_match = Regex::new(
-        r"(?x)
-                                (?P<host>(github|gitlab|bitbucket)?)
-                                (?P<colon>(:))?
-                                (?P<owner>[\w,\-,_]+)
-                                /
-                                (?P<repo>[\w,\-,_]+)
-                                ",
-    )
-    .unwrap();
-    if repo_match.is_match(src) {
-        let caps = repo_match.captures(src).unwrap();
-        let host = caps.name("host").unwrap().as_str();
-        // println!("{}",host);
-        let hosten;
-        if host.contains("github") {
-            hosten = Host::Github;
-        } else if host.contains("gitlab") {
-            hosten = Host::Gitlab(host.to_string());
-        } else if host.contains("bitbucket") {
-            hosten = Host::BitBucket;
-        } else {
-            return Err("Git provider not supported.")?;
+    let re = Regex::new(
+            r"^(?:(?:https://)?([^:/]+\.[^:/]+)/|git@([^:/]+)[:/]|([^/]+):)?([^/\s]+)/([^/\s#]+)((?:/[^/\s#]+)+)?(?:/)?(?:#(.+))?"
+        ).unwrap();
+
+    let captures = re
+        .captures(src)
+        .ok_or_else(|| format!("Could not parse src: {src}"))?;
+
+    // Determine host from multiple formats that might match regex
+    let host = if let Some(domain) = captures.get(1).or_else(|| captures.get(2)) {
+        match domain.as_str() {
+            "github.com" => Host::GitHub,
+            "bitbucket.org" => Host::BitBucket,
+            other => Host::GitLab(other.to_string()),
         }
-        let res = Repo {
-            owner: caps.name("owner").unwrap().as_str().to_string(),
-            project: caps.name("repo").unwrap().as_str().to_string(),
-            host: hosten,
-        };
-        return Ok(res);
-    }
-    if shortrepo_match.is_match(src) {
-        let caps = shortrepo_match.captures(src).unwrap();
-        let host = caps.name("host").unwrap().as_str();
-        let colon = caps.name("colon");
-        let hosten;
-        if let None = colon {
-            hosten = Host::Github;
-        } else {
-            if host.contains("github") {
-                hosten = Host::Github;
-            } else if host.contains("gitlab") {
-                hosten = Host::Gitlab("gitlab.com".to_string());
-            } else if host.contains("bitbucket") {
-                hosten = Host::BitBucket;
-            } else {
-                return Err("Git provider not supported.")?;
-            }
+    } else if let Some(shorthand) = captures.get(3) {
+        match shorthand.as_str() {
+            "github" | "gh" => Host::GitHub,
+            "gitlab" | "gl" => Host::GitLab("gitlab.com".to_string()),
+            "bitbucket" | "bb" => Host::BitBucket,
+            other => Host::GitLab(other.to_string()),
         }
-        let res = Repo {
-            owner: caps.name("owner").unwrap().as_str().to_string(),
-            project: caps.name("repo").unwrap().as_str().to_string(),
-            host: hosten,
-        };
-        return Ok(res);
-    }
-    Err("Could not parse repository")?
+    } else {
+        Host::GitHub
+    };
+
+    let res = Repo {
+        host,
+        owner: captures.get(4).unwrap().as_str().to_string(),
+        name: captures
+            .get(5)
+            .unwrap()
+            .as_str()
+            .trim_end_matches(".git")
+            .to_string(),
+        subdir: captures
+            .get(6)
+            .map(|m| m.as_str().trim_start_matches('/').to_string()),
+        gitref: captures.get(7).map(|m| m.as_str().to_string()),
+    };
+    return Ok(res);
 }
 
 fn download(repo: Repo, dest: PathBuf) -> Result<(), Box<dyn Error>> {
+    let hash = get_hash(&repo)?;
+
     let url = match &repo.host {
-        Host::Github => format!(
-            "https://github.com/{}/{}/archive/HEAD.tar.gz",
-            repo.owner, repo.project
+        Host::GitHub => format!("{}/archive/{}.tar.gz", repo.url(), hash),
+        Host::GitLab(_) => format!(
+            "{}/-/archive/{}/{}-{}.tar.gz",
+            repo.url(),
+            hash,
+            repo.name,
+            hash
         ),
-        Host::Gitlab(x) => format!(
-            "https://{}/{}/{}/repository/archive.tar.gz",
-            x, repo.owner, repo.project
-        ),
-        Host::BitBucket => format!(
-            "https://bitbucket.org/{}/{}/get/HEAD.zip",
-            repo.owner, repo.project
-        ),
+        Host::BitBucket => format!("{}/get/{}.tar.gz", repo.url(), hash),
     };
     // println!("{}", url);
     let client = reqwest::Client::new();
@@ -163,13 +153,36 @@ fn download(repo: Repo, dest: PathBuf) -> Result<(), Box<dyn Error>> {
     archive
         .entries()?
         .filter_map(|e| e.ok())
-        .map(|mut entry| -> Result<PathBuf, Box<dyn Error>> {
-            let path = entry.path()?;
-            let path = path
-                .strip_prefix(path.components().next().unwrap())?
-                .to_owned();
-            entry.unpack(dest.join(&path))?;
-            Ok(path)
+        .filter_map(|mut entry| -> Option<Result<PathBuf, Box<dyn Error>>> {
+            let path = match entry.path() {
+                Ok(p) => p,
+                Err(e) => return Some(Err(e.into())),
+            };
+
+            // Strip root directory (first component of tar archive)
+            let path = match path.strip_prefix(path.components().next().unwrap()) {
+                Ok(p) => p.to_owned(),
+                Err(e) => return Some(Err(e.into())),
+            };
+
+            // If subdirectory is specified, filter and strip it
+            let final_path = if let Some(subdir) = &repo.subdir {
+                if path.starts_with(subdir) {
+                    match path.strip_prefix(subdir) {
+                        Ok(p) => p.to_owned(),
+                        Err(e) => return Some(Err(e.into())),
+                    }
+                } else {
+                    return None; // Skip files not in the subdirectory
+                }
+            } else {
+                path
+            };
+
+            match entry.unpack(dest.join(&final_path)) {
+                Ok(_) => Some(Ok(final_path)),
+                Err(e) => Some(Err(e.into())),
+            }
         })
         .filter_map(|e| e.ok())
         .for_each(|x| pb.set_message(&format!("{}", x.display())));
@@ -189,7 +202,7 @@ pub fn validate_dest(dest: String) -> Result<(), String> {
         if path.is_dir() {
             let count = std::fs::read_dir(&path).map_err(|x| x.to_string())?.count();
             if count != 0 {
-                Err("Directory is not empty.")?
+                Err(format!("Directory is not empty: {}", path.display()))?
             }
         } else {
             Err("Destination is not a directory.")?
@@ -214,15 +227,113 @@ pub fn validate_dest(dest: String) -> Result<(), String> {
             path
         }
     };
-    while !realpath.exists(){
+    while !realpath.exists() {
         realpath.pop();
     }
-    if std::fs::metadata(&realpath).unwrap().permissions().readonly(){
+    if std::fs::metadata(&realpath)
+        .unwrap()
+        .permissions()
+        .readonly()
+    {
         Err("Directory is read-only.")?
     }
     // println!("realpath: {:?}", realpath);
 
     Ok(())
+}
+
+#[derive(Debug, Clone, PartialEq)]
+enum RefType {
+    Head,
+    Branch,
+    Tag,
+    Other(String),
+}
+
+#[derive(Debug, Clone, PartialEq)]
+struct GitRef {
+    ref_type: RefType,
+    name: String,
+    hash: String,
+}
+
+fn fetch_refs(repo: &Repo) -> Result<Vec<GitRef>, Box<dyn Error>> {
+    let output = Command::new("git")
+        .arg("ls-remote")
+        .arg(&repo.url())
+        .output()?;
+
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        return Err(format!("could not fetch remote {}: {}", repo.url(), stderr).into());
+    }
+
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let re = Regex::new(r"refs/(\w+)/(.+)").unwrap();
+
+    stdout
+        .lines()
+        .filter(|line| !line.is_empty())
+        .map(|row| {
+            let parts: Vec<&str> = row.split('\t').collect();
+            if parts.len() != 2 {
+                return Err(format!("could not parse git ref: {row}").into());
+            }
+
+            let hash = parts[0].to_string();
+            let git_ref = parts[1];
+
+            if git_ref == "HEAD" {
+                return Ok(GitRef {
+                    ref_type: RefType::Head,
+                    name: git_ref.to_string(),
+                    hash,
+                });
+            }
+
+            let captures = re
+                .captures(git_ref)
+                .ok_or_else(|| format!("could not parse {git_ref}"))?;
+
+            let ref_type_str = captures.get(1).unwrap().as_str();
+            let name = captures.get(2).unwrap().as_str().to_string();
+
+            let ref_type = match ref_type_str {
+                "heads" => RefType::Branch,
+                "tags" => RefType::Tag,
+                "refs" => RefType::Other("ref".to_string()),
+                other => RefType::Other(other.to_string()),
+            };
+
+            Ok(GitRef {
+                ref_type,
+                name,
+                hash,
+            })
+        })
+        .collect()
+}
+
+fn get_hash(repo: &Repo) -> Result<String, Box<dyn Error>> {
+    let refs = fetch_refs(repo)?;
+
+    // If no gitref specified or it's "HEAD", return HEAD
+    if repo.gitref.is_none() || repo.gitref.as_deref() == Some("HEAD") {
+        if let Some(head_ref) = refs.iter().find(|r| r.ref_type == RefType::Head) {
+            return Ok(head_ref.hash.clone());
+        }
+    }
+
+    // Otherwise search for matching ref
+    if let Some(gitref) = &repo.gitref {
+        for r in &refs {
+            if &r.name == gitref || r.hash.starts_with(gitref.as_str()) {
+                return Ok(r.hash.clone());
+            }
+        }
+    }
+
+    Err("Reference not found.".into())
 }
 
 #[cfg(test)]
