@@ -1,7 +1,6 @@
 use clap::{Arg, ArgAction, Command, crate_version};
 
-#[tokio::main]
-async fn main() {
+fn main() {
     let matches = Command::new("degit-rs")
         .version(crate_version!())
         .about("Download the contents of a git repository without cloning it.")
