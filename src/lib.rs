@@ -324,6 +324,8 @@ fn get_hash(repo: &Repo) -> Result<String, Box<dyn Error>> {
                 return Ok(r.hash.clone());
             }
         }
+
+        return Err(format!("Reference not found: {gitref}").into());
     }
 
     Err("Reference not found.".into())
